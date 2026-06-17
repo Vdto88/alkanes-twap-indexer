@@ -109,6 +109,10 @@ pub fn index_block(block: &Block, height: u32) -> Result<()> {
     let _updated_addresses =
         Protorune::index_block::<AlkaneMessageContext>(block.clone(), height.into())?;
 
+    // v2 TWAP: record one price-accumulator observation for the tracked pool.
+    // No-op when no pool is registered, so existing indexing is unaffected.
+    crate::twap::record_observation(height)?;
+
     if is_active(height.into()) {
         unwrap::update_last_block(height as u128)?;
     }

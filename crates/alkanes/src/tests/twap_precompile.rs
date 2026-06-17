@@ -6,6 +6,8 @@ use anyhow::Result;
 #[allow(unused_imports)]
 use metashrew_core::{println, stdio::{stdout, Write}};
 use wasm_bindgen_test::wasm_bindgen_test;
+use crate::index_block;
+use protorune::test_helpers::create_block_with_coinbase_tx;
 
 #[wasm_bindgen_test]
 fn test_spot_price_q64() -> Result<()> {
@@ -66,6 +68,25 @@ fn test_twap_insufficient_history_errors() -> Result<()> {
     assert!(crate::twap::twap(&pool, 5).is_err());
     let other = AlkaneId { block: 9, tx: 9 };
     assert!(crate::twap::twap(&other, 1).is_err());
+
+    crate::twap::unregister_pool();
+    Ok(())
+}
+
+#[wasm_bindgen_test]
+fn test_hook_records_via_index_block() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    crate::twap::register_pool(&pool);
+    crate::twap::seed_reserves(&pool, 1_000_000, 1_000_000); // price = 2^64
+
+    let block = create_block_with_coinbase_tx(1);
+    index_block(&block, 1)?;
+
+    // The hook should have written cum[1] = spot_price_q64(1e6, 1e6) = 2^64,
+    // and advanced last-height to 1.
+    assert_eq!(crate::twap::cumulative_at(&pool, 1), 1u128 << 64);
+    assert_eq!(crate::twap::last_height(&pool), 1);
 
     crate::twap::unregister_pool();
     Ok(())
