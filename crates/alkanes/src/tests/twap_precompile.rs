@@ -13,6 +13,12 @@ use crate::tests::std::alkanes_std_test_build;
 use alkanes_support::cellpack::Cellpack;
 use bitcoin::OutPoint;
 
+/// DIESEL (token0, denominator) and frBTC (token1, numerator) ids for tests.
+/// Arbitrary distinct ids; only their distinctness from the pool and each other matters.
+fn test_tokens() -> (AlkaneId, AlkaneId) {
+    (AlkaneId { block: 2, tx: 0 }, AlkaneId { block: 32, tx: 0 })
+}
+
 #[wasm_bindgen_test]
 fn test_spot_price_q64() -> Result<()> {
     // equal reserves -> price == 1.0 in Q64.64 == 2^64
@@ -28,7 +34,8 @@ fn test_spot_price_q64() -> Result<()> {
 fn test_record_and_twap_happy_path() -> Result<()> {
     clear();
     let pool = AlkaneId { block: 2, tx: 77087 };
-    crate::twap::register_pool(&pool);
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
 
     // Price series over heights 1..=6 (reserves kept small; r1 varies the price).
     let r0 = 1_000_000u128;
@@ -63,7 +70,8 @@ fn test_record_and_twap_happy_path() -> Result<()> {
 fn test_twap_insufficient_history_errors() -> Result<()> {
     clear();
     let pool = AlkaneId { block: 2, tx: 77087 };
-    crate::twap::register_pool(&pool);
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
     crate::twap::seed_reserves(&pool, 1_000_000, 1_000_000);
     crate::twap::record_observation(1)?; // only one observation (first=last=1)
 
@@ -81,7 +89,8 @@ fn test_twap_insufficient_history_errors() -> Result<()> {
 fn test_hook_records_via_index_block() -> Result<()> {
     clear();
     let pool = AlkaneId { block: 2, tx: 77087 };
-    crate::twap::register_pool(&pool);
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
     crate::twap::seed_reserves(&pool, 1_000_000, 1_000_000); // price = 2^64
 
     let block = create_block_with_coinbase_tx(1);
@@ -99,7 +108,8 @@ fn test_hook_records_via_index_block() -> Result<()> {
 // Seed a known accumulator directly (no hook), set tip, leave pool UNREGISTERED
 // so the consumer's index_block does not perturb the series.
 fn seed_series_unregistered(pool: &AlkaneId, r0: u128, r1s: &[u128]) -> [u128; 16] {
-    crate::twap::register_pool(pool);
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(pool, &t0, &t1);
     let mut ref_cum = [0u128; 16];
     let mut acc = 0u128;
     for (i, &r1) in r1s.iter().enumerate() {

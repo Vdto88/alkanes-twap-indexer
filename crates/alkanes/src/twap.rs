@@ -29,6 +29,12 @@ pub fn spot_price_q64(r0: u128, r1: u128) -> u128 {
 fn pool_registry_ptr() -> IndexPointer {
     IndexPointer::from_keyword("/twap/pool")
 }
+fn token0_ptr() -> IndexPointer {
+    IndexPointer::from_keyword("/twap/token0")
+}
+fn token1_ptr() -> IndexPointer {
+    IndexPointer::from_keyword("/twap/token1")
+}
 fn reserves_ptr(pool: &AlkaneId) -> IndexPointer {
     IndexPointer::from_keyword("/twap/mock-reserves/").select(&pool.clone().into())
 }
@@ -44,13 +50,21 @@ fn last_height_ptr(pool: &AlkaneId) -> IndexPointer {
 
 // ---- registry (single tracked pool) ----------------------------------------
 
-pub fn register_pool(pool: &AlkaneId) {
+pub fn register_pool(pool: &AlkaneId, token0: &AlkaneId, token1: &AlkaneId) {
     let mut p = pool_registry_ptr();
     p.set(Arc::new(pool.clone().into()));
+    let mut t0 = token0_ptr();
+    t0.set(Arc::new(token0.clone().into()));
+    let mut t1 = token1_ptr();
+    t1.set(Arc::new(token1.clone().into()));
 }
 pub fn unregister_pool() {
     let mut p = pool_registry_ptr();
     p.set(Arc::new(Vec::new()));
+    let mut t0 = token0_ptr();
+    t0.set(Arc::new(Vec::new()));
+    let mut t1 = token1_ptr();
+    t1.set(Arc::new(Vec::new()));
 }
 fn registered_pool() -> Option<AlkaneId> {
     let bytes = pool_registry_ptr().get().as_ref().clone();
@@ -59,6 +73,15 @@ fn registered_pool() -> Option<AlkaneId> {
     } else {
         AlkaneId::try_from(bytes).ok()
     }
+}
+#[allow(dead_code)]
+fn registered_tokens() -> Option<(AlkaneId, AlkaneId)> {
+    let t0 = token0_ptr().get().as_ref().clone();
+    let t1 = token1_ptr().get().as_ref().clone();
+    if t0.is_empty() || t1.is_empty() {
+        return None;
+    }
+    Some((AlkaneId::try_from(t0).ok()?, AlkaneId::try_from(t1).ok()?))
 }
 
 // ---- mock reserves (test seed; production swaps this for a real pool read) --
