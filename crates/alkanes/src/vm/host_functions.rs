@@ -677,6 +677,27 @@ impl AlkanesHostFunctionsImpl {
         *DIESEL_MINTS_CACHE.write().unwrap() = Some(response.data.clone());
         Ok(response)
     }
+    fn _get_twap(
+        caller: &mut Caller<'_, AlkanesState>,
+        cellpack: &Cellpack,
+    ) -> Result<CallResponse> {
+        let _ = caller; // storage is read via global IndexPointer, no context needed
+        if cellpack.inputs.len() < 3 {
+            return Err(anyhow!(
+                "get_twap: expected inputs [pool_block, pool_tx, window]"
+            ));
+        }
+        let pool = AlkaneId {
+            block: cellpack.inputs[0],
+            tx: cellpack.inputs[1],
+        };
+        let window = cellpack.inputs[2] as u32;
+        let value = crate::twap::twap(&pool, window)?;
+        let mut response = CallResponse::default();
+        response.data = value.to_le_bytes().to_vec();
+        Ok(response)
+    }
+
     fn _handle_special_extcall(
         caller: &mut Caller<'_, AlkanesState>,
         cellpack: Cellpack,
@@ -694,6 +715,7 @@ impl AlkanesHostFunctionsImpl {
             1 => Self::_get_coinbase_tx_response(caller),
             2 => Self::_get_number_diesel_mints(caller),
             3 => Self::_get_total_miner_fee(caller),
+            4 => Self::_get_twap(caller, &cellpack),
             _ => {
                 return Err(anyhow!(
                     "Unknown precompiled contract: [{}, {}]",
@@ -729,8 +751,12 @@ impl AlkanesHostFunctionsImpl {
     ) -> Result<i32> {
         // Check for precompiled contract addresses
         if cellpack.target.block == 800000000 {
-            // 8e8
-            return Self::_handle_special_extcall(caller, cellpack);
+            // 8e8 — precompile path does not create a checkpoint, so errors must not
+            // trigger a rollback (which would underflow the checkpoint stack).
+            return match Self::_handle_special_extcall(caller, cellpack) {
+                ok @ Ok(_) => ok,
+                Err(e) => Ok(Self::_handle_extcall_abort::<T>(caller, e, false)),
+            };
         }
 
         // Regular contract execution

@@ -8,6 +8,10 @@ use metashrew_core::{println, stdio::{stdout, Write}};
 use wasm_bindgen_test::wasm_bindgen_test;
 use crate::index_block;
 use protorune::test_helpers::create_block_with_coinbase_tx;
+use crate::tests::helpers::{self as alkane_helpers, assert_return_context, assert_revert_context};
+use crate::tests::std::alkanes_std_test_build;
+use alkanes_support::cellpack::Cellpack;
+use bitcoin::OutPoint;
 
 #[wasm_bindgen_test]
 fn test_spot_price_q64() -> Result<()> {
@@ -89,5 +93,82 @@ fn test_hook_records_via_index_block() -> Result<()> {
     assert_eq!(crate::twap::last_height(&pool), 1);
 
     crate::twap::unregister_pool();
+    Ok(())
+}
+
+// Seed a known accumulator directly (no hook), set tip, leave pool UNREGISTERED
+// so the consumer's index_block does not perturb the series.
+fn seed_series_unregistered(pool: &AlkaneId, r0: u128, r1s: &[u128]) -> [u128; 16] {
+    crate::twap::register_pool(pool);
+    let mut ref_cum = [0u128; 16];
+    let mut acc = 0u128;
+    for (i, &r1) in r1s.iter().enumerate() {
+        let h = (i as u32) + 1;
+        crate::twap::seed_reserves(pool, r0, r1);
+        crate::twap::record_observation(h).unwrap();
+        acc = acc.wrapping_add((r1 << 64) / r0);
+        ref_cum[(i + 1)] = acc;
+    }
+    crate::twap::unregister_pool(); // hook is now inert during the consumer block
+    ref_cum
+}
+
+#[wasm_bindgen_test]
+fn test_get_twap_precompile_onchain() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    let r0 = 1_000_000u128;
+    let r1s = [1_000_000u128, 1_100_000, 1_200_000, 1_300_000, 1_400_000, 1_500_000];
+    let ref_cum = seed_series_unregistered(&pool, r0, &r1s); // tip = 6, first = 1
+
+    let window = 5u32;
+    let expected = (ref_cum[6].wrapping_sub(ref_cum[1])) / (window as u128);
+
+    // Consumer = alkanes-std-test; opcode 33 = test_static_call(target, inputs).
+    // WIT dispatch: [opcode, target.block, target.tx, list_len, elem0, elem1, ...].
+    // list<u64> decodes as: length-prefix then elements, all as u128.
+    // Inner precompile cellpack inputs will be [pool.block, pool.tx, window].
+    let cp = Cellpack {
+        target: AlkaneId { block: 1, tx: 0 }, // deploy-and-call (like special_extcall)
+        inputs: vec![33, 800000000, 4, 3, pool.block, pool.tx, window as u128],
+    };
+    let test_block = alkane_helpers::init_with_multiple_cellpacks_with_tx(
+        [alkanes_std_test_build::get_bytes()].into(),
+        [cp].into(),
+    );
+    index_block(&test_block, 0)?;
+
+    let outpoint = OutPoint { txid: test_block.txdata[1].compute_txid(), vout: 3 };
+    assert_return_context(&outpoint, |trace_response| {
+        let got = u128::from_le_bytes(trace_response.inner.data[0..16].try_into()?);
+        println!("on-chain TWAP = {}, expected = {}", got, expected);
+        assert_eq!(got, expected);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[wasm_bindgen_test]
+fn test_get_twap_precompile_reverts_on_insufficient_history() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    let r0 = 1_000_000u128;
+    let r1s = [1_000_000u128, 1_100_000]; // only 2 observations (tip = 2, first = 1)
+    let _ = seed_series_unregistered(&pool, r0, &r1s);
+
+    // window = 5 > available -> precompile returns Err -> extcall aborts -> revert.
+    // WIT list<u64> encoding: length prefix then elements.
+    let cp = Cellpack {
+        target: AlkaneId { block: 1, tx: 0 },
+        inputs: vec![33, 800000000, 4, 3, pool.block, pool.tx, 5u128],
+    };
+    let test_block = alkane_helpers::init_with_multiple_cellpacks_with_tx(
+        [alkanes_std_test_build::get_bytes()].into(),
+        [cp].into(),
+    );
+    index_block(&test_block, 0)?;
+
+    let outpoint = OutPoint { txid: test_block.txdata[1].compute_txid(), vout: 3 };
+    assert_revert_context(&outpoint, "insufficient history")?;
     Ok(())
 }
