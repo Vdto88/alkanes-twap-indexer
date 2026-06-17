@@ -217,3 +217,28 @@ fn test_get_twap_precompile_reverts_on_insufficient_history() -> Result<()> {
     assert_revert_context(&outpoint, "insufficient history")?;
     Ok(())
 }
+
+// A drained side (reserve == 0) must NOT be recorded: tip stays put, no cum written.
+#[wasm_bindgen_test]
+fn test_zero_reserve_skips_observation() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
+
+    // Block 1: healthy reserves -> recorded, tip advances to 1.
+    crate::twap::seed_reserves(&pool, 1_000_000, 1_000_000);
+    crate::twap::record_observation(1)?;
+    assert_eq!(crate::twap::last_height(&pool), 1);
+    let cum1 = crate::twap::cumulative_at(&pool, 1);
+
+    // Block 2: one side drained (r1 == 0) -> must be skipped.
+    crate::twap::seed_reserves(&pool, 1_000_000, 0);
+    crate::twap::record_observation(2)?;
+    assert_eq!(crate::twap::last_height(&pool), 1); // tip did NOT advance
+    assert_eq!(crate::twap::cumulative_at(&pool, 2), 0); // nothing written at h=2
+    assert_eq!(crate::twap::cumulative_at(&pool, 1), cum1); // h=1 untouched
+
+    crate::twap::unregister_pool();
+    Ok(())
+}

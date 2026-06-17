@@ -14,7 +14,7 @@ use metashrew_core::index_pointer::IndexPointer;
 use metashrew_support::index_pointer::KeyValuePointer;
 use std::sync::Arc;
 
-/// Fixed-point scale for the spot price (Q64.64). Mock reserves must stay < 2^(128-64).
+/// Fixed-point scale for the spot price (Q64.64). Reserves must stay < 2^(128-64).
 pub const PRICE_SCALE_BITS: u32 = 64;
 
 /// Q64.64 spot price = (r1 << 64) / r0. Returns 0 if r0 == 0.
@@ -114,6 +114,9 @@ fn read_reserves(pool: &AlkaneId) -> Option<(u128, u128)> {
     let (token0, token1) = registered_tokens()?;
     let r0 = pool_balance(&token0, pool);
     let r1 = pool_balance(&token1, pool);
+    if r0 == 0 || r1 == 0 {
+        return None; // no liquidity on a side -> skip, don't poison the TWAP
+    }
     Some((r0, r1))
 }
 
