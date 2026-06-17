@@ -2,32 +2,73 @@
 
 > **This is a focused fork of [`kungfuflex/alkanes-rs`](https://github.com/kungfuflex/alkanes-rs)** (rev `888f4fe6`) that adds **one** thing: an **indexer-side TWAP** for an AMM pair, served on-chain by a native `get_twap(window)` precompile. The upstream alkanes-rs README is preserved below the divider.
 
-**What it proves:** an AMM TWAP can be computed *inside the indexer* — a fresh price accumulator written **every block**, readable on-chain by any contract through a native precompile. This makes a price keeper, `poke` transactions, and on-chain ring buffers **redundant**, and makes oracle staleness **moot** (fresh every block, trustless, manipulation-resistant).
+**What it proves:** an AMM TWAP can be served **indexer-side** in alkanes-rs. The indexer computes a **fresh price accumulator every block**, and a native **`get_twap(window)` precompile** returns the time-weighted average — callable **on-chain** by any contract. This makes a price keeper, `poke` transactions, and on-chain ring buffers **redundant**, and makes oracle staleness **moot** (the value is fresh every block, trustless, and manipulation-resistant).
 
-**Full write-up: [`TWAP_DEMO.md`](./TWAP_DEMO.md).** Short version:
+It is the indexer-side counterpart to a contract-side TWAP oracle (the usual `poke` + keeper + ring-buffer design); a lending protocol's `get_price` seam survives — it would simply read this precompile instead of computing from poked checkpoints. Proven by green tests (`cargo test`) + CI.
 
-- **Reserves are read live from the VM balance-sheet** (`/alkanes/<token>/balances/<pool>`) inside `record_observation` — the pool's true end-of-block reserves (the balance the pool holds in each token, the same key the VM's `balance_pointer` builds). No mock, no RPC, no Postgres.
-- **`register_pool(pool, token0, token1)`** picks the pair and orientation: token0 = denominator, token1 = numerator → for DIESEL/frBTC, TWAP = **frBTC per DIESEL**. A block where either side is drained (reserve 0) is skipped, so a zero/∞ spot never poisons the average.
-- **Precompile `get_twap`** (opcode `4` at magic address `800000000`) is callable on-chain via `staticcall`; it reads `tip = last committed height`, so an intra-block trade can't move the value a consumer reads that block.
+## How it works
 
-**Three native-Rust pieces, all in the `alkanes` crate:**
+Three native-Rust pieces in the `alkanes` crate (`crates/alkanes/src/twap.rs`, `crates/alkanes/src/indexer.rs`, `crates/alkanes/src/vm/host_functions.rs`):
 
-| File | Responsibility |
-|---|---|
-| `crates/alkanes/src/twap.rs` | accumulator (`u128` Q64.64), live reserve read, `twap()` |
-| `crates/alkanes/src/indexer.rs` | per-block hook `record_observation` (after `Protorune::index_block`) |
-| `crates/alkanes/src/vm/host_functions.rs` | the `get_twap` precompile arm in `_handle_special_extcall` |
+```
+[pool reserves change]
+        │  (once per block)
+        ▼
+index_block(h)  ──►  Protorune::index_block  ──►  twap::record_observation(h)
+                                                     reads live reserves from the VM balance-sheet
+                                                     cum[h] = cum[h-1] + spot_price   (Q64.64, u128)
+                                                     stores cum[h], last_height = h
+        │  (later block)
+        ▼
+contract  ──staticcall──►  [800000000, 4, pool, window]   (the get_twap precompile, opcode 4 @ 8e8)
+                                                     twap = (cum[tip] - cum[tip-window]) / window
+                                                     tip = last committed height
+        ▼
+returndata  =  TWAP (Q64.64)
+```
 
-**Run the tests (9 green):**
+- **Accumulator (`twap::record_observation`)** runs once per block from `index_block`. It is a no-op unless a pool is registered, so existing indexing is unaffected. It computes a fresh accumulator even in blocks with no trades — that is the key property that removes the keeper and staleness.
+- **Reserves are read live from the VM balance-sheet** (`/alkanes/<token>/balances/<pool>`) — a pool's reserve == the balance it holds in each token, the same key the VM's `balance_pointer` builds. So the accumulator weights the pool's *true end-of-block reserves*, not a seeded value. `register_pool(pool, token0, token1)` picks the pair and orientation (token0 = denominator, token1 = numerator → for DIESEL/frBTC, TWAP = frBTC per DIESEL). A block where either side is drained (reserve 0) is skipped, so a zero/∞ spot never poisons the average.
+- **Precompile (`get_twap`, opcode `4` at the magic address `800000000`)** is a new arm in `_handle_special_extcall`, reachable on-chain via `staticcall` (the same mechanism as the existing block-header / miner-fee precompiles). It reverts on insufficient history.
+- **Manipulation-resistant by construction:** `get_twap` reads `tip = last committed height`, so a trade in the *current* block cannot move the value a consumer reads in that block.
+
+## Run it
 
 ```bash
-# scope to -p alkanes (the pinned rustc 1.86 can't build the whole workspace)
+# build needs the pinned rustc 1.86 (rust-toolchain.toml); scope to -p alkanes
 cargo test -p alkanes --target wasm32-unknown-unknown --features test-utils twap_precompile
 ```
 
-**Status: prototype / proof, not production-wired.** Deliberate follow-ups: wiring `register_pool` into the real indexer init, u256 widening of the accumulator, and rebasing onto the production indexer codebase. A latent VM bug (precompile error path calling `rollback()` with no matching checkpoint — affects all precompiles) was found and fixed along the way; see `TWAP_DEMO.md`.
+Nine `#[wasm_bindgen_test]` tests pass:
 
-**Open question for the indexer team:** the `index_block` hook is **consensus-critical** (it changes indexed state for everyone running the indexer — it is *not* a contract you deploy in a transaction). So: **who builds & operates this in production — us (fork → PR) or the indexer team?** This fork exists to make that decision concrete.
+| Test | Proves |
+|---|---|
+| `test_spot_price_q64` | Q64.64 spot-price math |
+| `test_record_and_twap_happy_path` | accumulator + TWAP equals an independent reference |
+| `test_twap_insufficient_history_errors` | reverts on window=0 / too-large window / unknown pool |
+| `test_hook_records_via_index_block` | the hook records an observation when a block is indexed |
+| `test_get_twap_precompile_onchain` | a contract reads the TWAP **on-chain** via `staticcall` |
+| `test_get_twap_precompile_reverts_on_insufficient_history` | the on-chain call reverts cleanly |
+| `test_read_reserves_matches_real_balance_pointer_key` | the balance-sheet key matches the VM's real `balance_pointer` key (writes via the production path, reads via the hook) |
+| `test_zero_reserve_skips_observation` | a drained side (reserve 0) is skipped: tip doesn't advance, no cumulative written |
+| `test_record_tracks_changing_reserves` | accumulator tracks non-monotonic reserves (up/down/up) vs an independent reference |
+
+The on-chain tests use the existing prebuilt `alkanes-std-test` contract's `test_static_call` (opcode 33) — **no contract rebuild** — exactly the `extcall → 8e8` path a consumer's `get_price` would use.
+
+## Notable: a latent VM bug fixed along the way
+
+The precompile error path (`extcall`, `crates/alkanes/src/vm/host_functions.rs`) returns **before** `atomic.checkpoint()`. The previous code routed a precompile error to `_handle_extcall_abort(…, true)`, which calls `rollback()` with no matching checkpoint → checkpoint-stack underflow → panic. This affects **all** precompiles (0–3 too); the insufficient-history error test is just the first to exercise a precompile error. Fixed by aborting the precompile branch with `rollback = false`. Successful precompile calls are unchanged (existing `special_extcall` tests stay green).
+
+## Scope / non-goals (prototype)
+
+- **Reserves are read live** from the VM balance-sheet (`/alkanes/<token>/balances/<pool>`) — a pool's reserve == the balance it holds in each token, the same key the VM's `balance_pointer` builds. `register_pool(pool, token0, token1)` records the pair; orientation token0=DIESEL (denominator), token1=frBTC (numerator) → TWAP = frBTC per DIESEL. Single tracked pool for simplicity.
+- **Accumulator is `u128` Q64.64** (alkanes-rs has no u256 `ByteView`); reserves must stay < 2^64 (holds for BTC-scale sat reserves) to avoid overflow in the `r1 << 64` spot step. Production would widen to u256 with UniV2-style wrapping (already `wrapping_*` here).
+- Time unit = 1 block. The accumulator is computed **here** from live reserves, so it does not depend on the pool's op98 cumulative — wiring into the live DIESEL/frBTC pool (`2:77087`) is a follow-up.
+- Not wired into a consumer protocol yet (the `get_price` rewire is a follow-up), and the precompile isn't yet wired into the real indexer init (`register_pool`) — both deliberate follow-ups.
+
+## Open question for the indexer team
+
+The `index_block` hook is **consensus-critical** (it changes indexed state for everyone running the indexer — it is *not* a contract you deploy in a transaction). **Who builds & operates the precompile in production — us (fork → PR) or the indexer team?** This prototype exists to make that decision concrete.
 
 ---
 
