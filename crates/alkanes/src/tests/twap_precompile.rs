@@ -140,8 +140,9 @@ fn test_hook_records_via_index_block() -> Result<()> {
     Ok(())
 }
 
-// Seed a known accumulator directly (no hook), set tip, leave pool UNREGISTERED
-// so the consumer's index_block does not perturb the series.
+// Register + seed a known accumulator across heights, then UNREGISTER so the
+// consumer's index_block leaves the series untouched (the hook is inert without
+// a registered pool). Registration is temporary, only to drive seed/record here.
 fn seed_series_unregistered(pool: &AlkaneId, r0: u128, r1s: &[u128]) -> [u128; 16] {
     let (t0, t1) = test_tokens();
     crate::twap::register_pool(pool, &t0, &t1);
