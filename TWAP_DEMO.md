@@ -21,7 +21,7 @@ Three native-Rust pieces in the `alkanes` crate (`crates/alkanes/src/twap.rs`,
         │  (once per block)
         ▼
 index_block(h)  ──►  Protorune::index_block  ──►  twap::record_observation(h)
-                                                     reads reserves (op97-style)
+                                                     reads live reserves from the VM balance-sheet
                                                      cum[h] = cum[h-1] + spot_price   (Q64.64, u128)
                                                      stores cum[h], last_height = h
         │  (later block)
@@ -36,6 +36,10 @@ returndata  =  TWAP (Q64.64)
 - **Accumulator (`twap::record_observation`)** runs once per block from `index_block`. It is a no-op
   unless a pool is registered, so existing indexing is unaffected. It computes a fresh accumulator
   even in blocks with no trades — that is the key property that removes the keeper and staleness.
+- **Reserves are read live from the VM balance-sheet** (`/alkanes/<token>/balances/<pool>`) — a pool's
+  reserve == the balance it holds in each token, the same key the VM's `balance_pointer` builds. So the
+  accumulator weights the pool's *true end-of-block reserves*, not a seeded value. A block where either
+  side is drained (reserve 0) is skipped, so a zero/∞ spot never poisons the average.
 - **Precompile (`get_twap`, opcode `4` at the magic address `800000000`)** is a new arm in
   `_handle_special_extcall`, reachable on-chain via `staticcall` (the same mechanism as the existing
   block-header / miner-fee precompiles). It reverts on insufficient history.
@@ -49,7 +53,7 @@ returndata  =  TWAP (Q64.64)
 cargo test -p alkanes --target wasm32-unknown-unknown --features test-utils twap_precompile
 ```
 
-Six `#[wasm_bindgen_test]` tests pass:
+Nine `#[wasm_bindgen_test]` tests pass:
 
 | Test | Proves |
 |---|---|
@@ -59,6 +63,9 @@ Six `#[wasm_bindgen_test]` tests pass:
 | `test_hook_records_via_index_block` | the hook records an observation when a block is indexed |
 | `test_get_twap_precompile_onchain` | a contract reads the TWAP **on-chain** via `staticcall` |
 | `test_get_twap_precompile_reverts_on_insufficient_history` | the on-chain call reverts cleanly |
+| `test_read_reserves_matches_real_balance_pointer_key` | the balance-sheet key matches the VM's real `balance_pointer` key (writes via the production path, reads via the hook) |
+| `test_zero_reserve_skips_observation` | a drained side (reserve 0) is skipped: tip doesn't advance, no cumulative written |
+| `test_record_tracks_changing_reserves` | accumulator tracks non-monotonic reserves (up/down/up) vs an independent reference |
 
 The on-chain tests use the existing prebuilt `alkanes-std-test` contract's `test_static_call`
 (opcode 33) — **no contract rebuild** — exactly the `extcall → 8e8` path Ginko's `get_price` will use.
@@ -74,12 +81,15 @@ precompile calls are unchanged (existing `special_extcall` tests stay green).
 
 ## Scope / non-goals (prototype)
 
-- **Reserves are seeded** into a mock pointer (`/twap/mock-reserves/<pool>`); `read_reserves` is the
-  seam to swap for a real synth-pool read (op97 / pool storage). Single tracked pool for simplicity.
-- **Accumulator is `u128` Q64.64** (alkanes-rs has no u256 `ByteView`); mock reserves are kept small
-  to avoid overflow. Production would widen to u256 with UniV2-style wrapping (already `wrapping_*` here).
-- Time unit = 1 block; reconciling the fixed-point scale / unit with the real DIESEL/frBTC pool
-  (`2:77087`) op98 is a follow-up.
+- **Reserves are read live** from the VM balance-sheet (`/alkanes/<token>/balances/<pool>`) — a pool's
+  reserve == the balance it holds in each token, the same key the VM's `balance_pointer` builds.
+  `register_pool(pool, token0, token1)` records the pair; orientation token0=DIESEL (denominator),
+  token1=frBTC (numerator) → TWAP = frBTC per DIESEL. Single tracked pool for simplicity.
+- **Accumulator is `u128` Q64.64** (alkanes-rs has no u256 `ByteView`); reserves must stay < 2^64 (holds
+  for BTC-scale sat reserves) to avoid overflow in the `r1 << 64` spot step. Production would widen to
+  u256 with UniV2-style wrapping (already `wrapping_*` here).
+- Time unit = 1 block. The v2 computes its **own** accumulator from live reserves, so it does not depend
+  on the pool's op98 cumulative — wiring into the live DIESEL/frBTC pool (`2:77087`) is a follow-up.
 - Not wired into Ginko's `ginko-alkanes` yet (the `get_price` rewire is a follow-up), and not proposed
   upstream — this fork is the proof.
 
