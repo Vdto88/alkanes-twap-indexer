@@ -7,9 +7,9 @@ keeper, `poke` transactions, and on-chain ring buffers **redundant**, and makes 
 **moot** (the value is fresh every block, trustless, and manipulation-resistant).
 
 This is a self-contained prototype in a fork of `kungfuflex/alkanes-rs`, proven by green tests
-(`cargo test`) + CI. It is the indexer-side counterpart to the contract-side TWAP v1 (Ginko
-`ginko-oracle-adapter`); the `get_price` seam in Ginko survives — it would simply read this
-precompile instead of computing from poked checkpoints.
+(`cargo test`) + CI. It is the indexer-side counterpart to a contract-side TWAP oracle (the usual
+`poke` + keeper + ring-buffer design); a lending protocol's `get_price` seam survives — it would
+simply read this precompile instead of computing from poked checkpoints.
 
 ## How it works
 
@@ -68,7 +68,7 @@ Nine `#[wasm_bindgen_test]` tests pass:
 | `test_record_tracks_changing_reserves` | accumulator tracks non-monotonic reserves (up/down/up) vs an independent reference |
 
 The on-chain tests use the existing prebuilt `alkanes-std-test` contract's `test_static_call`
-(opcode 33) — **no contract rebuild** — exactly the `extcall → 8e8` path Ginko's `get_price` will use.
+(opcode 33) — **no contract rebuild** — exactly the `extcall → 8e8` path a consumer's `get_price` would use.
 
 ## Notable: a latent VM bug fixed along the way
 
@@ -90,7 +90,7 @@ precompile calls are unchanged (existing `special_extcall` tests stay green).
   u256 with UniV2-style wrapping (already `wrapping_*` here).
 - Time unit = 1 block. The v2 computes its **own** accumulator from live reserves, so it does not depend
   on the pool's op98 cumulative — wiring into the live DIESEL/frBTC pool (`2:77087`) is a follow-up.
-- Not wired into Ginko's `ginko-alkanes` yet (the `get_price` rewire is a follow-up), and not proposed
+- Not wired into a consumer protocol yet (the `get_price` rewire is a follow-up), and not proposed
   upstream — this fork is the proof.
 
 ## Open question for the group

@@ -1,4 +1,4 @@
-# ginko-oracle-indexer — indexer-side TWAP for ALKANES (prototype fork)
+# alkanes-twap-indexer — indexer-side TWAP for ALKANES (prototype fork)
 
 > **This is a focused fork of [`kungfuflex/alkanes-rs`](https://github.com/kungfuflex/alkanes-rs)** (rev `888f4fe6`) that adds **one** thing: an **indexer-side TWAP** for an AMM pair, served on-chain by a native `get_twap(window)` precompile. The upstream alkanes-rs README is preserved below the divider.
 
