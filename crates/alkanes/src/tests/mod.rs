@@ -71,5 +71,7 @@ pub mod vec_input_test;
 pub mod view;
 #[cfg(test)]
 pub mod trace_structure;
+#[cfg(test)]
+pub mod twap_precompile;
 #[cfg(all(test, feature = "mainnet"))]
 pub mod block_892614_mainnet;

@@ -28,6 +28,7 @@ pub mod indexer;
 pub mod message;
 pub mod network;
 pub mod precompiled;
+pub mod twap;
 pub mod tables;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod tests;
