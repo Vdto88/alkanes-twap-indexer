@@ -218,6 +218,37 @@ fn test_get_twap_precompile_reverts_on_insufficient_history() -> Result<()> {
     Ok(())
 }
 
+// Reserves change each block (simulated swaps), r1 non-monotonic. The accumulator
+// and twap must match a hand-computed reference over the changing spot prices.
+#[wasm_bindgen_test]
+fn test_record_tracks_changing_reserves() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
+
+    let r0 = 1_000_000u128;
+    let r1s = [1_000_000u128, 3_000_000, 1_500_000, 2_000_000]; // up, down, up
+
+    let mut ref_cum = [0u128; 5];
+    let mut acc = 0u128;
+    for (i, &r1) in r1s.iter().enumerate() {
+        let h = (i as u32) + 1;
+        crate::twap::seed_reserves(&pool, r0, r1); // re-seed = reserves moved via swaps
+        crate::twap::record_observation(h)?;
+        acc = acc.wrapping_add((r1 << 64) / r0);
+        ref_cum[h as usize] = acc;
+    }
+
+    // tip = 4; window = 3 -> average over heights 2..=4 = (cum[4]-cum[1]) / 3
+    let window = 3u32;
+    let expected = (ref_cum[4].wrapping_sub(ref_cum[1])) / (window as u128);
+    assert_eq!(crate::twap::twap(&pool, window)?, expected);
+
+    crate::twap::unregister_pool();
+    Ok(())
+}
+
 // A drained side (reserve == 0) must NOT be recorded: tip stays put, no cum written.
 #[wasm_bindgen_test]
 fn test_zero_reserve_skips_observation() -> Result<()> {
