@@ -1,0 +1,38 @@
+name: TWAP precompile
+
+on:
+  push:
+    branches: ["feat/twap-precompile"]
+
+jobs:
+  twap-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # rust-toolchain.toml pins 1.86.0; install it + the wasm32 target.
+      - name: Install Rust 1.86 + wasm32
+        uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          targets: wasm32-unknown-unknown
+
+      # The runner must match the crate's wasm-bindgen (0.2.114 in Cargo.lock).
+      # `cargo install wasm-bindgen-cli 0.2.114` needs rustc >= 1.88 (a transitive
+      # `time` dep), which conflicts with the pinned 1.86 — so use the official
+      # prebuilt binary instead.
+      - name: Install wasm-bindgen-test-runner 0.2.114 (prebuilt)
+        run: |
+          curl -sL https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.114/wasm-bindgen-0.2.114-x86_64-unknown-linux-musl.tar.gz | tar xz
+          echo "$PWD/wasm-bindgen-0.2.114-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+
+      # Scope to -p alkanes: a whole-workspace build pulls alkanes-integ-tests ->
+      # wasmtime 43 -> rustc 1.91, which conflicts with the pinned 1.86. The
+      # `alkanes` crate (where the TWAP work lives) builds fine on 1.86.
+      - name: TWAP precompile tests
+        run: cargo test -p alkanes --target wasm32-unknown-unknown --features test-utils twap_precompile
+
+      - name: special_extcall regression
+        run: cargo test -p alkanes --target wasm32-unknown-unknown --features test-utils special_extcall
