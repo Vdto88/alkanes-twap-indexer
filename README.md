@@ -1,3 +1,38 @@
+# ginko-oracle-indexer — indexer-side TWAP for ALKANES (prototype fork)
+
+> **This is a focused fork of [`kungfuflex/alkanes-rs`](https://github.com/kungfuflex/alkanes-rs)** (rev `888f4fe6`) that adds **one** thing: an **indexer-side TWAP** for an AMM pair, served on-chain by a native `get_twap(window)` precompile. The upstream alkanes-rs README is preserved below the divider.
+
+**What it proves:** an AMM TWAP can be computed *inside the indexer* — a fresh price accumulator written **every block**, readable on-chain by any contract through a native precompile. This makes a price keeper, `poke` transactions, and on-chain ring buffers **redundant**, and makes oracle staleness **moot** (fresh every block, trustless, manipulation-resistant).
+
+**Full write-up: [`TWAP_DEMO.md`](./TWAP_DEMO.md).** Short version:
+
+- **Reserves are read live from the VM balance-sheet** (`/alkanes/<token>/balances/<pool>`) inside `record_observation` — the pool's true end-of-block reserves (the balance the pool holds in each token, the same key the VM's `balance_pointer` builds). No mock, no RPC, no Postgres.
+- **`register_pool(pool, token0, token1)`** picks the pair and orientation: token0 = denominator, token1 = numerator → for DIESEL/frBTC, TWAP = **frBTC per DIESEL**. A block where either side is drained (reserve 0) is skipped, so a zero/∞ spot never poisons the average.
+- **Precompile `get_twap`** (opcode `4` at magic address `800000000`) is callable on-chain via `staticcall`; it reads `tip = last committed height`, so an intra-block trade can't move the value a consumer reads that block.
+
+**Three native-Rust pieces, all in the `alkanes` crate:**
+
+| File | Responsibility |
+|---|---|
+| `crates/alkanes/src/twap.rs` | accumulator (`u128` Q64.64), live reserve read, `twap()` |
+| `crates/alkanes/src/indexer.rs` | per-block hook `record_observation` (after `Protorune::index_block`) |
+| `crates/alkanes/src/vm/host_functions.rs` | the `get_twap` precompile arm in `_handle_special_extcall` |
+
+**Run the tests (9 green):**
+
+```bash
+# scope to -p alkanes (the pinned rustc 1.86 can't build the whole workspace)
+cargo test -p alkanes --target wasm32-unknown-unknown --features test-utils twap_precompile
+```
+
+**Status: prototype / proof, not production-wired.** Deliberate follow-ups: wiring `register_pool` into the real indexer init, u256 widening of the accumulator, and rebasing onto the production indexer codebase. A latent VM bug (precompile error path calling `rollback()` with no matching checkpoint — affects all precompiles) was found and fixed along the way; see `TWAP_DEMO.md`.
+
+**Open question for the indexer team:** the `index_block` hook is **consensus-critical** (it changes indexed state for everyone running the indexer — it is *not* a contract you deploy in a transaction). So: **who builds & operates this in production — us (fork → PR) or the indexer team?** This fork exists to make that decision concrete.
+
+---
+
+<sub>↓ upstream `kungfuflex/alkanes-rs` README below ↓</sub>
+
 # alkanes-rs
 
 ![Tests](https://img.shields.io/github/actions/workflow/status/AssemblyScript/assemblyscript/test.yml?branch=main&label=test&logo=github)
