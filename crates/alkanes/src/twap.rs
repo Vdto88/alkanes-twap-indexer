@@ -3,7 +3,8 @@
 //!
 //! Storage (metashrew IndexPointer):
 //!   /twap/pool                       -> registered pool AlkaneId bytes (single pool)
-//!   /twap/mock-reserves/<pool>       -> 32 bytes: r0 LE [0..16] | r1 LE [16..32]  (test seed)
+//!   /twap/token0, /twap/token1       -> registered pool's token ids (denom, numer)
+//!   reserves read live from /alkanes/<token>/balances/<pool> (VM balance-sheet)
 //!   /twap/cumulative/<pool>/<height> -> u128 cumulative (Q64.64 sum)
 //!   /twap/first-height/<pool>        -> u32 first recorded height
 //!   /twap/last-height/<pool>         -> u32 last recorded height (= the TWAP "tip")
@@ -29,14 +30,12 @@ pub fn spot_price_q64(r0: u128, r1: u128) -> u128 {
 fn pool_registry_ptr() -> IndexPointer {
     IndexPointer::from_keyword("/twap/pool")
 }
+// global, paired with pool_registry_ptr (single tracked pool)
 fn token0_ptr() -> IndexPointer {
     IndexPointer::from_keyword("/twap/token0")
 }
 fn token1_ptr() -> IndexPointer {
     IndexPointer::from_keyword("/twap/token1")
-}
-fn reserves_ptr(pool: &AlkaneId) -> IndexPointer {
-    IndexPointer::from_keyword("/twap/mock-reserves/").select(&pool.clone().into())
 }
 fn cumulative_ptr(pool: &AlkaneId) -> IndexPointer {
     IndexPointer::from_keyword("/twap/cumulative/").select(&pool.clone().into())
@@ -46,6 +45,19 @@ fn first_height_ptr(pool: &AlkaneId) -> IndexPointer {
 }
 fn last_height_ptr(pool: &AlkaneId) -> IndexPointer {
     IndexPointer::from_keyword("/twap/last-height/").select(&pool.clone().into())
+}
+
+/// Balance-sheet key: the balance of `token` held by `pool`. Byte-for-byte the
+/// same key the VM's `balance_pointer` (utils.rs) builds, minus the inventory
+/// side-effect (we only read).
+fn pool_balance_ptr(token: &AlkaneId, pool: &AlkaneId) -> IndexPointer {
+    IndexPointer::from_keyword("/alkanes/")
+        .select(&token.clone().into())
+        .keyword("/balances/")
+        .select(&pool.clone().into())
+}
+fn pool_balance(token: &AlkaneId, pool: &AlkaneId) -> u128 {
+    pool_balance_ptr(token, pool).get_value::<u128>()
 }
 
 // ---- registry (single tracked pool) ----------------------------------------
@@ -74,7 +86,6 @@ fn registered_pool() -> Option<AlkaneId> {
         AlkaneId::try_from(bytes).ok()
     }
 }
-#[allow(dead_code)]
 fn registered_tokens() -> Option<(AlkaneId, AlkaneId)> {
     let t0 = token0_ptr().get().as_ref().clone();
     let t1 = token1_ptr().get().as_ref().clone();
@@ -84,22 +95,25 @@ fn registered_tokens() -> Option<(AlkaneId, AlkaneId)> {
     Some((AlkaneId::try_from(t0).ok()?, AlkaneId::try_from(t1).ok()?))
 }
 
-// ---- mock reserves (test seed; production swaps this for a real pool read) --
+// ---- test seed helpers (write the REAL balance-sheet keyspace) --------------
 
-pub fn seed_reserves(pool: &AlkaneId, r0: u128, r1: u128) {
-    let mut bytes = vec![0u8; 32];
-    bytes[0..16].copy_from_slice(&r0.to_le_bytes());
-    bytes[16..32].copy_from_slice(&r1.to_le_bytes());
-    let mut p = reserves_ptr(pool);
-    p.set(Arc::new(bytes));
+pub fn seed_pool_balance(token: &AlkaneId, pool: &AlkaneId, amount: u128) {
+    let mut p = pool_balance_ptr(token, pool);
+    p.set_value::<u128>(amount);
 }
-fn read_reserves(pool: &AlkaneId) -> Option<(u128, u128)> {
-    let bytes = reserves_ptr(pool).get().as_ref().clone();
-    if bytes.len() < 32 {
-        return None;
+pub fn seed_reserves(pool: &AlkaneId, r0: u128, r1: u128) {
+    if let Some((token0, token1)) = registered_tokens() {
+        seed_pool_balance(&token0, pool, r0);
+        seed_pool_balance(&token1, pool, r1);
     }
-    let r0 = u128::from_le_bytes(bytes[0..16].try_into().ok()?);
-    let r1 = u128::from_le_bytes(bytes[16..32].try_into().ok()?);
+}
+
+// ---- reserve read (production: live balance-sheet) --------------------------
+
+fn read_reserves(pool: &AlkaneId) -> Option<(u128, u128)> {
+    let (token0, token1) = registered_tokens()?;
+    let r0 = pool_balance(&token0, pool);
+    let r1 = pool_balance(&token1, pool);
     Some((r0, r1))
 }
 

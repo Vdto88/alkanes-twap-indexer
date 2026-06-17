@@ -12,6 +12,9 @@ use crate::tests::helpers::{self as alkane_helpers, assert_return_context, asser
 use crate::tests::std::alkanes_std_test_build;
 use alkanes_support::cellpack::Cellpack;
 use bitcoin::OutPoint;
+use crate::utils::balance_pointer;
+use metashrew_core::index_pointer::AtomicPointer;
+use metashrew_support::index_pointer::KeyValuePointer;
 
 /// DIESEL (token0, denominator) and frBTC (token1, numerator) ids for tests.
 /// Arbitrary distinct ids; only their distinctness from the pool and each other matters.
@@ -61,6 +64,38 @@ fn test_record_and_twap_happy_path() -> Result<()> {
     // window = 1 -> just the last block's price = (cum[6]-cum[5]) / 1
     let expected1 = ref_cum[6].wrapping_sub(ref_cum[5]);
     assert_eq!(crate::twap::twap(&pool, 1)?, expected1);
+
+    crate::twap::unregister_pool();
+    Ok(())
+}
+
+// Proves twap's balance-sheet key matches the VM's real key. Writes balances
+// via the production `balance_pointer` path (committed through an AtomicPointer),
+// then drives the hook and checks it read exactly those reserves. Without this,
+// seed_reserves + read_reserves would be self-consistent even on a wrong key.
+#[wasm_bindgen_test]
+fn test_read_reserves_matches_real_balance_pointer_key() -> Result<()> {
+    clear();
+    let pool = AlkaneId { block: 2, tx: 77087 };
+    let (t0, t1) = test_tokens();
+    crate::twap::register_pool(&pool, &t0, &t1);
+
+    let r0 = 1_234_567u128;
+    let r1 = 7_654_321u128;
+
+    // Write reserves through the REAL VM balance key, then commit to the base store.
+    let mut atomic = AtomicPointer::default();
+    balance_pointer(&mut atomic, &pool, &t0).set_value::<u128>(r0);
+    balance_pointer(&mut atomic, &pool, &t1).set_value::<u128>(r1);
+    atomic.commit();
+
+    // The hook must read exactly those balances.
+    crate::twap::record_observation(1)?;
+    assert_eq!(
+        crate::twap::cumulative_at(&pool, 1),
+        crate::twap::spot_price_q64(r0, r1)
+    );
+    assert_eq!(crate::twap::last_height(&pool), 1);
 
     crate::twap::unregister_pool();
     Ok(())
